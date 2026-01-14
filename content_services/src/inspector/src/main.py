@@ -17,7 +17,7 @@ from shared.inspector.utils.dag import (
 )
 from shared.inspector.utils.task import TaskManager
 
-from .hatchet_funcs import delete_symbol_table_cache, put_diff_content_cache
+from .hatchet_funcs import delete_symbol_table_cache, put_diff_content_cache_async
 from .tasks import (
     CodebaseTaggingTask,
     CSymbolTableTask,
@@ -444,7 +444,7 @@ async def inspect_db(
             previous_version_content = None
 
         if previous_version_id is not None:
-            put_diff_content_cache(
+            await put_diff_content_cache_async(
                 str(previous_version_id),
                 flat_topo_file_diff_dag,
             )
