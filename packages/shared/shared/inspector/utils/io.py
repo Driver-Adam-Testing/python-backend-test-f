@@ -145,3 +145,116 @@ def cleanup_symbol_table_cache(version_id: str) -> None:
     cache_path = _get_symbol_table_cache_path(version_id)
     with contextlib.suppress(Exception):
         cache_path.unlink(missing_ok=True)
+
+
+# Generic cache S3 persistence functions
+# Used for large caches that need to survive container reschedules
+
+
+def _get_cache_s3_key(cache_type: str, key: str) -> str:
+    """Generate S3 key for a cache entry. Uses 'cache/' prefix for lifecycle rules."""
+    safe_key = key.replace("/", "_").replace(":", "_")
+    return f"cache/{cache_type}/{safe_key}.pkl"
+
+
+def _get_cache_local_path(cache_type: str, key: str) -> Path:
+    """Generate local file path for cache entry."""
+    safe_key = key.replace("/", "_").replace(":", "_")
+    return Path(f"/tmp/inspector_cache_{cache_type}_{safe_key}.pkl")
+
+
+def upload_cache_to_s3(
+    cache_type: str,
+    key: str,
+    value: Any,
+    s3_client: Any,
+    bucket_name: str,
+) -> str:
+    """Upload a cache entry to S3 with pickle serialization."""
+    import os
+    import tempfile
+
+    start_time = time.time()
+    s3_key = _get_cache_s3_key(cache_type, key)
+
+    fd, temp_path = tempfile.mkstemp(suffix=".pkl")
+    try:
+        with os.fdopen(fd, "wb") as temp_file:
+            pickle.dump(value, temp_file)
+
+        file_size_mb = Path(temp_path).stat().st_size / (1024 * 1024)
+        s3_client.upload_file(temp_path, bucket_name, s3_key)
+
+        total_time = time.time() - start_time
+        print(
+            f"Cache [{cache_type}] uploaded ({file_size_mb:.2f}MB) in {total_time:.2f}s to {bucket_name}/{s3_key}"
+        )
+    except Exception as e:
+        Path(temp_path).unlink(missing_ok=True)
+        raise RuntimeError(f"Failed to upload cache [{cache_type}] to S3") from e
+    finally:
+        Path(temp_path).unlink(missing_ok=True)
+
+    return s3_key
+
+
+def download_cache_from_s3(
+    cache_type: str,
+    key: str,
+    s3_client: Any,
+    bucket_name: str,
+) -> Any:
+    """Download a cache entry from S3, with local file cache fallback."""
+    cache_path = _get_cache_local_path(cache_type, key)
+
+    # Try local file cache first
+    try:
+        start_time = time.time()
+        with open(cache_path, "rb") as f:
+            value = pickle.load(f)
+        file_size_mb = cache_path.stat().st_size / (1024 * 1024)
+        cache_time = time.time() - start_time
+        print(
+            f"Cache [{cache_type}] loaded from local file ({file_size_mb:.2f}MB) in {cache_time:.2f}s"
+        )
+        return value
+    except FileNotFoundError:
+        pass
+    except Exception:
+        cache_path.unlink(missing_ok=True)
+
+    # Download from S3
+    start_time = time.time()
+    s3_key = _get_cache_s3_key(cache_type, key)
+    try:
+        s3_client.download_file(bucket_name, s3_key, str(cache_path))
+    except Exception as e:
+        raise KeyError(f"Cache [{cache_type}] key '{key}' not found in S3") from e
+
+    with open(cache_path, "rb") as f:
+        value = pickle.load(f)
+
+    file_size_mb = cache_path.stat().st_size / (1024 * 1024)
+    download_time = time.time() - start_time
+    print(
+        f"Cache [{cache_type}] downloaded from S3 ({file_size_mb:.2f}MB) in {download_time:.2f}s"
+    )
+    return value
+
+
+def delete_cache_from_s3(
+    cache_type: str,
+    key: str,
+    s3_client: Any,
+    bucket_name: str,
+) -> None:
+    """Delete a cache entry from S3 and local file cache."""
+    # Clean up local file
+    cache_path = _get_cache_local_path(cache_type, key)
+    with contextlib.suppress(Exception):
+        cache_path.unlink(missing_ok=True)
+
+    # Clean up S3 (best effort, don't fail if not found)
+    s3_key = _get_cache_s3_key(cache_type, key)
+    with contextlib.suppress(Exception):
+        s3_client.delete_object(Bucket=bucket_name, Key=s3_key)
