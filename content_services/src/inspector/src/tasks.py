@@ -34,15 +34,15 @@ from workflows.inspector_functions import (
 )
 
 from .hatchet_funcs import (
-    delete_folder_child_nodes_to_docs_cache,
-    delete_source_code_cache,
-    delete_tech_doc_output_cache,
-    get_tech_doc_output_cache,
-    put_folder_child_nodes_to_docs_cache,
-    put_source_code_cache,
+    delete_folder_child_nodes_to_docs_cache_async,
+    delete_source_code_cache_async,
+    delete_tech_doc_output_cache_async,
+    get_tech_doc_output_cache_async,
+    put_folder_child_nodes_to_docs_cache_async,
+    put_source_code_cache_async,
     put_symbol_table_cache,
-    put_tags_cache,
-    put_top_level_cache,
+    put_tags_cache_async,
+    put_top_level_cache_async,
 )
 
 TechDocsTask = Union["FileTechDocTask", "FolderTechDocTask", "TopLevelDocsTask"]
@@ -120,7 +120,7 @@ class FolderTechDocTask(Task):
                 if ContentKind(k) in pass_through_content_kinds
             }
         async with folder_tech_docs_sem:
-            put_folder_child_nodes_to_docs_cache(
+            await put_folder_child_nodes_to_docs_cache_async(
                 f"{self.version_id}:{self.node.root_rel_path}",
                 child_nodes_to_docs,
             )
@@ -133,11 +133,13 @@ class FolderTechDocTask(Task):
             await folder_doc_task.aio_run(
                 folder_doc_input, options=TriggerWorkflowOptions(sticky=True)
             )
-            docs = get_tech_doc_output_cache(
+            docs = await get_tech_doc_output_cache_async(
                 f"{self.version_id}:{self.node.root_rel_path}"
             )
-            delete_tech_doc_output_cache(f"{self.version_id}:{self.node.root_rel_path}")
-            delete_folder_child_nodes_to_docs_cache(
+            await delete_tech_doc_output_cache_async(
+                f"{self.version_id}:{self.node.root_rel_path}"
+            )
+            await delete_folder_child_nodes_to_docs_cache_async(
                 f"{self.version_id}:{self.node.root_rel_path}"
             )
         return TaskResult(data={"docs": docs}, serialization=SerializationMethod.JSON)
@@ -312,7 +314,7 @@ class FileTechDocTask(Task):
                 .replace("\\u0000", "")
                 .replace("\x00", "")
             )  # Apparently the \\u0000 and \x00 is an issue with hatchet
-            put_source_code_cache(
+            await put_source_code_cache_async(
                 f"{self.version_id}:{self.node.root_rel_path}", cleaned_source
             )
             tech_doc_input = TechDocInput(
@@ -323,11 +325,15 @@ class FileTechDocTask(Task):
             await tech_doc_task.aio_run(
                 tech_doc_input, options=TriggerWorkflowOptions(sticky=True)
             )
-            tech_doc_output = get_tech_doc_output_cache(
+            tech_doc_output = await get_tech_doc_output_cache_async(
                 f"{self.version_id}:{self.node.root_rel_path}"
             )
-            delete_source_code_cache(f"{self.version_id}:{self.node.root_rel_path}")
-            delete_tech_doc_output_cache(f"{self.version_id}:{self.node.root_rel_path}")
+            await delete_source_code_cache_async(
+                f"{self.version_id}:{self.node.root_rel_path}"
+            )
+            await delete_tech_doc_output_cache_async(
+                f"{self.version_id}:{self.node.root_rel_path}"
+            )
             success = tech_doc_output["success"]
             docs = tech_doc_output["file_doc"]
 
@@ -629,7 +635,7 @@ class TopLevelDocsTask(Task):
         children_nodes_to_docs = {
             task.node: dr.data["docs"] for task, dr in dependent_results.items()
         }
-        put_top_level_cache(
+        await put_top_level_cache_async(
             str(self.db_version_node_id),
             children_nodes_to_docs,
         )
@@ -834,7 +840,7 @@ class CodebaseTaggingTask(Task):
             children_nodes_to_docs = {
                 task.node: dr.data["docs"] for task, dr in dependent_results.items()
             }
-            put_tags_cache(
+            await put_tags_cache_async(
                 str(self.db_root_version_node_id),
                 children_nodes_to_docs,
             )
