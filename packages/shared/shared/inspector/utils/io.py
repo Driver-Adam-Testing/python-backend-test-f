@@ -1,9 +1,12 @@
 import contextlib
+import logging
 import pickle
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 def get_prompt_template(f: Path | str) -> str:
@@ -117,6 +120,8 @@ def download_symbol_table_from_s3_with_cache(
         print(
             f"Symbol table loaded from cache ({file_size_mb:.2f}MB) in {cache_time:.2f}s"
         )
+        # Delete local file after loading - we rely on in-memory cache, not local files
+        cache_path.unlink(missing_ok=True)
         return symbol_table
     except FileNotFoundError:
         pass
@@ -138,6 +143,8 @@ def download_symbol_table_from_s3_with_cache(
     print(
         f"Symbol table downloaded from S3 ({file_size_mb:.2f}MB) in {download_time:.2f}s"
     )
+    # Delete local file after loading - we rely on in-memory cache, not local files
+    cache_path.unlink(missing_ok=True)
     return symbol_table
 
 
@@ -207,7 +214,7 @@ def download_cache_from_s3(
     """Download a cache entry from S3, with local file cache fallback."""
     cache_path = _get_cache_local_path(cache_type, key)
 
-    # Try local file cache first
+    # Try local file cache first (if it exists from a previous download)
     try:
         start_time = time.time()
         with open(cache_path, "rb") as f:
@@ -217,6 +224,8 @@ def download_cache_from_s3(
         print(
             f"Cache [{cache_type}] loaded from local file ({file_size_mb:.2f}MB) in {cache_time:.2f}s"
         )
+        # Delete local file after loading - we rely on in-memory cache, not local files
+        cache_path.unlink(missing_ok=True)
         return value
     except FileNotFoundError:
         pass
@@ -226,10 +235,14 @@ def download_cache_from_s3(
     # Download from S3
     start_time = time.time()
     s3_key = _get_cache_s3_key(cache_type, key)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         s3_client.download_file(bucket_name, s3_key, str(cache_path))
     except Exception as e:
-        raise KeyError(f"Cache [{cache_type}] key '{key}' not found in S3") from e
+        logger.error(
+            f"Error downloading cache [{cache_type}] key '{s3_key}' from S3: {e}"
+        )
+        raise KeyError(f"Cache [{cache_type}] key '{s3_key}' not found in S3") from e
 
     with open(cache_path, "rb") as f:
         value = pickle.load(f)
@@ -239,6 +252,8 @@ def download_cache_from_s3(
     print(
         f"Cache [{cache_type}] downloaded from S3 ({file_size_mb:.2f}MB) in {download_time:.2f}s"
     )
+    # Delete local file after loading - we rely on in-memory cache, not local files
+    cache_path.unlink(missing_ok=True)
     return value
 
 

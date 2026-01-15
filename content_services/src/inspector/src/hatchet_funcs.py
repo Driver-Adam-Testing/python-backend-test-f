@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 import threading
 import time
@@ -7,6 +8,8 @@ from typing import Any
 
 from shared.inspector.inspection.files import comprehend_file_top_down
 from shared.inspector.utils.dag import LiteNode
+
+logger = logging.getLogger(__name__)
 
 
 class TTLCache:
@@ -127,6 +130,7 @@ class S3BackedTTLCache:
 
         # Write to L2 (S3)
         try:
+            logger.debug(f"Uploading cache [{self._cache_type}] to S3 for key {key}")
             self._upload_to_s3(key, value)
         except Exception as e:
             print(f"Warning: Failed to persist cache [{self._cache_type}] to S3: {e}")
@@ -167,11 +171,7 @@ class S3BackedTTLCache:
         # Delete from L1
         self._l1.delete(key)
 
-        # Delete from L2 (S3)
-        try:
-            self._delete_from_s3(key)
-        except Exception as e:
-            print(f"Warning: Failed to delete cache [{self._cache_type}] from S3: {e}")
+        # NOTE: Do NOT delete from L2 (S3) in case we resume inspection and must refetch the cache result
 
     # ==================== Async methods ====================
 
@@ -222,11 +222,7 @@ class S3BackedTTLCache:
         # Delete from L1 (fast)
         self._l1.delete(key)
 
-        # Delete from L2 (S3) in thread
-        try:
-            await asyncio.to_thread(self._delete_from_s3, key)
-        except Exception as e:
-            print(f"Warning: Failed to delete cache [{self._cache_type}] from S3: {e}")
+        # NOTE: Do NOT delete from L2 (S3) in case we resume inspection and must refetch the cache result
 
 
 # Create cache instances (each with its own lock)
