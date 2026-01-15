@@ -8,7 +8,6 @@ from hatchet_sdk import Context, remove_null_unicode_character
 from hatchet_sdk.runnables.types import (
     ConcurrencyExpression,
     ConcurrencyLimitStrategy,
-    StickyStrategy,
 )
 from inspector.src.deep_context_docs import deep_context_docs
 from inspector.src.hatchet_funcs import (
@@ -85,7 +84,6 @@ class CodebaseTagsInput(BaseModel):
         expression="'codebase-tags-workflow'",  # NOTE: must be a string literal to be evaluated as a constant task name
         limit_strategy=ConcurrencyLimitStrategy.GROUP_ROUND_ROBIN,
     ),
-    sticky=StickyStrategy.HARD,
 )
 def codebase_tags_task(input: CodebaseTagsInput, ctx: Context) -> dict[str, str]:
     print("starting codebase tags task")
@@ -139,7 +137,6 @@ def export_tech_docs_task(input: ExportDocsInput, ctx: Context) -> dict[str, str
         expression="'deep-context-docs-workflow'",  # NOTE: must be a string literal to be evaluated as a constant task name
         limit_strategy=ConcurrencyLimitStrategy.GROUP_ROUND_ROBIN,
     ),
-    sticky=StickyStrategy.HARD,
 )
 async def deep_context_docs_task(input: DeepContextDocsInput, ctx: Context) -> dict:
     print("starting deep context docs task")
@@ -180,7 +177,6 @@ async def deep_context_docs_task(input: DeepContextDocsInput, ctx: Context) -> d
         limit_strategy=ConcurrencyLimitStrategy.GROUP_ROUND_ROBIN,
     ),
     schedule_timeout=timedelta(minutes=60),
-    sticky=StickyStrategy.HARD,
 )
 def tech_doc_task(input: TechDocInput, ctx: Context) -> dict[str, str]:
     print("starting tech doc task")
@@ -214,7 +210,6 @@ def tech_doc_task(input: TechDocInput, ctx: Context) -> dict[str, str]:
         expression="'folder-doc-workflow'",  # NOTE: must be a string literal to be evaluated as a constant task name
         limit_strategy=ConcurrencyLimitStrategy.GROUP_ROUND_ROBIN,
     ),
-    sticky=StickyStrategy.HARD,
 )
 def folder_doc_task(input: FolderDocInput, ctx: Context) -> dict[str, str]:
     print("starting folder doc task")
@@ -284,7 +279,6 @@ def symbol_doc_task(input: SymbolDocInput, ctx: Context) -> list[dict[str, Any]]
         expression="'toplevel-doc-workflow'",  # NOTE: must be a string literal to be evaluated as a constant task name
         limit_strategy=ConcurrencyLimitStrategy.GROUP_ROUND_ROBIN,
     ),
-    sticky=StickyStrategy.HARD,
 )
 def toplevel_doc_task(input: TopLevelDocInput, ctx: Context) -> dict[str, Any]:
     print("starting toplevel doc task")
