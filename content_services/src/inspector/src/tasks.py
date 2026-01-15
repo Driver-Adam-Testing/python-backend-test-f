@@ -131,7 +131,10 @@ class FolderTechDocTask(Task):
                 previous_content=previous_content,
             )
             await folder_doc_task.aio_run(
-                folder_doc_input, options=TriggerWorkflowOptions(sticky=True)
+                folder_doc_input,
+                options=TriggerWorkflowOptions(
+                    child_key=f"{self.version_id}:{self.node.root_rel_path}"
+                ),
             )
             docs = await get_tech_doc_output_cache_async(
                 f"{self.version_id}:{self.node.root_rel_path}"
@@ -323,7 +326,10 @@ class FileTechDocTask(Task):
                 version_id=self.version_id,
             )
             await tech_doc_task.aio_run(
-                tech_doc_input, options=TriggerWorkflowOptions(sticky=True)
+                tech_doc_input,
+                options=TriggerWorkflowOptions(
+                    child_key=f"{self.version_id}:{self.node.root_rel_path}"
+                ),
             )
             tech_doc_output = await get_tech_doc_output_cache_async(
                 f"{self.version_id}:{self.node.root_rel_path}"
@@ -644,7 +650,10 @@ class TopLevelDocsTask(Task):
             version_node_id=str(self.db_version_node_id),
         )
         docs = await toplevel_doc_task.aio_run(
-            toplevel_doc_input, options=TriggerWorkflowOptions(sticky=True)
+            toplevel_doc_input,
+            options=TriggerWorkflowOptions(
+                child_key=str(self.db_version_node_id) + ":toplevel"
+            ),
         )
 
         return TaskResult(data={"docs": docs}, serialization=SerializationMethod.JSON)
@@ -850,7 +859,9 @@ class CodebaseTaggingTask(Task):
                     version_node_id=str(self.db_root_version_node_id),
                     content_kinds=content_kinds_to_compute,
                 ),
-                options=TriggerWorkflowOptions(sticky=True),
+                options=TriggerWorkflowOptions(
+                    child_key=str(self.db_root_version_node_id) + ":codebase_tags"
+                ),
             )
 
         return TaskResult(
