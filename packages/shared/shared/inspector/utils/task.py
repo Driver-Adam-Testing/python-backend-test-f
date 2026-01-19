@@ -288,7 +288,7 @@ class TaskManager:
 
         self._initialize_progress()
 
-        if len(result_loading_config) > 0 and self.persistence:
+        if self.persistence:  # ALWAYS try to load as long as persistence is set
             # We can block the event loop with blocking IO when loading the state we aren't running
             # anything concurrent yet
             self.load_persisted_results(result_loading_config)
