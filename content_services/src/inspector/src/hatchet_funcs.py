@@ -23,7 +23,6 @@ class TTLCache:
     def put(
         self, key: str, value: Any, ttl_seconds: int | None = None
     ) -> tuple[str, list[str]]:
-        """Put a value in the cache. Returns (key, evicted_keys)."""
         now = time.time()
         ttl = ttl_seconds if ttl_seconds is not None else self._default_ttl
         expires = now + ttl
@@ -79,7 +78,6 @@ class S3BackedTTLCache:
         self._async_load_locks_guard = asyncio.Lock()
 
     def _get_s3_client_and_bucket(self) -> tuple[Any, str]:
-        """Get S3 client and bucket name from environment."""
         import boto3
 
         s3_client = boto3.client(
@@ -89,7 +87,6 @@ class S3BackedTTLCache:
         return s3_client, bucket_name
 
     def _upload_to_s3(self, key: str, value: Any) -> None:
-        """Internal sync S3 upload."""
         from shared.inspector.utils.io import upload_cache_to_s3
 
         s3_client, bucket_name = self._get_s3_client_and_bucket()
@@ -102,7 +99,6 @@ class S3BackedTTLCache:
         )
 
     def _download_from_s3(self, key: str) -> Any:
-        """Internal sync S3 download."""
         from shared.inspector.utils.io import download_cache_from_s3
 
         s3_client, bucket_name = self._get_s3_client_and_bucket()
@@ -114,7 +110,6 @@ class S3BackedTTLCache:
         )
 
     def _delete_from_s3(self, key: str) -> None:
-        """Internal sync S3 delete."""
         from shared.inspector.utils.io import delete_cache_from_s3
 
         s3_client, bucket_name = self._get_s3_client_and_bucket()
@@ -125,22 +120,15 @@ class S3BackedTTLCache:
             bucket_name=bucket_name,
         )
 
-    # ==================== Sync methods ====================
-
     def put(self, key: str, value: Any, ttl_seconds: int | None = None) -> str:
-        """Put value in L1 (memory) and L2 (S3). Blocking - use aput() in async code."""
-        # Write to L1
         _, evicted_keys = self._l1.put(key, value, ttl_seconds)
 
-        # Clean up locks for evicted keys to prevent memory leak
         if evicted_keys:
             with self._load_locks_guard:
                 for evicted_key in evicted_keys:
                     self._load_locks.pop(evicted_key, None)
 
-        # Write to L2 (S3)
         try:
-            logger.debug(f"Uploading cache [{self._cache_type}] to S3 for key {key}")
             self._upload_to_s3(key, value)
         except Exception as e:
             print(f"Warning: Failed to persist cache [{self._cache_type}] to S3: {e}")
@@ -148,14 +136,11 @@ class S3BackedTTLCache:
         return key
 
     def get(self, key: str) -> Any:
-        """Get from L1, falling back to L2 (S3). Blocking - use aget() in async code."""
-        # Fast path: try L1 first
         try:
             return self._l1.get(key)
         except KeyError:
             pass
 
-        # Slow path: load from S3 with coordination
         with self._load_locks_guard:
             if key not in self._load_locks:
                 self._load_locks[key] = threading.Lock()
@@ -168,7 +153,6 @@ class S3BackedTTLCache:
             except KeyError:
                 pass
 
-            # Load from S3
             print(
                 f"Cache [{self._cache_type}] not in memory, loading from S3 for key {key}"
             )
@@ -177,30 +161,21 @@ class S3BackedTTLCache:
             return value
 
     def delete(self, key: str) -> None:
-        """Delete from L1 and L2. Blocking - use adelete() in async code."""
-        # Delete from L1
         self._l1.delete(key)
 
-        # Clean up associated locks to prevent memory leak
         with self._load_locks_guard:
             self._load_locks.pop(key, None)
 
         # NOTE: Do NOT delete from L2 (S3) in case we resume inspection and must refetch the cache result
 
-    # ==================== Async methods ====================
-
     async def aput(self, key: str, value: Any, ttl_seconds: int | None = None) -> str:
-        """Async put - runs S3 upload in thread to avoid blocking event loop."""
-        # Write to L1 (fast, no I/O)
         _, evicted_keys = self._l1.put(key, value, ttl_seconds)
 
-        # Clean up async locks for evicted keys to prevent memory leak
         if evicted_keys:
             async with self._async_load_locks_guard:
                 for evicted_key in evicted_keys:
                     self._async_load_locks.pop(evicted_key, None)
 
-        # Write to L2 (S3) in thread
         try:
             await asyncio.to_thread(self._upload_to_s3, key, value)
         except Exception as e:
@@ -209,14 +184,11 @@ class S3BackedTTLCache:
         return key
 
     async def aget(self, key: str) -> Any:
-        """Async get - runs S3 download in thread to avoid blocking event loop."""
-        # Fast path: try L1 first (no I/O)
         try:
             return self._l1.get(key)
         except KeyError:
             pass
 
-        # Slow path: load from S3 with async coordination
         async with self._async_load_locks_guard:
             if key not in self._async_load_locks:
                 self._async_load_locks[key] = asyncio.Lock()
@@ -229,7 +201,6 @@ class S3BackedTTLCache:
             except KeyError:
                 pass
 
-            # Load from S3 in thread
             print(
                 f"Cache [{self._cache_type}] not in memory, loading from S3 for key {key}"
             )
@@ -238,8 +209,6 @@ class S3BackedTTLCache:
             return value
 
     async def adelete(self, key: str) -> None:
-        """Async delete - runs S3 delete in thread to avoid blocking event loop."""
-        # Delete from L1 (fast)
         self._l1.delete(key)
 
         # Clean up associated locks to prevent memory leak
@@ -271,7 +240,6 @@ _symbol_table_async_load_locks_guard = asyncio.Lock()
 
 
 def _download_symbol_table_sync(version_id: str) -> dict:
-    """Internal sync function to download symbol table from S3."""
     import boto3
     from shared.inspector.utils.io import download_symbol_table_from_s3_with_cache
 
@@ -319,14 +287,11 @@ def get_or_load_symbol_table(version_id: str) -> dict:
 
     Use get_or_load_symbol_table_async() in async code to avoid blocking the event loop.
     """
-    # Fast path: already in cache
     try:
         return _symbol_table_cache.get(version_id)
     except KeyError:
         pass
 
-    # Slow path: need to load from S3
-    # Get or create a lock for this specific version_id
     with _symbol_table_load_locks_guard:
         if version_id not in _symbol_table_load_locks:
             _symbol_table_load_locks[version_id] = threading.Lock()
@@ -339,7 +304,6 @@ def get_or_load_symbol_table(version_id: str) -> dict:
         except KeyError:
             pass
 
-        # We're the loader - download from S3
         print(f"Symbol table not in cache, loading from S3 for version {version_id}")
         symbol_table = _download_symbol_table_sync(version_id)
         _, evicted_keys = _symbol_table_cache.put(version_id, symbol_table)
@@ -361,26 +325,22 @@ async def get_or_load_symbol_table_async(version_id: str) -> dict:
     cold container (after reschedule), only ONE task downloads from S3 while
     others wait. Runs S3 download in thread to avoid blocking event loop.
     """
-    # Fast path: already in cache
     try:
         return _symbol_table_cache.get(version_id)
     except KeyError:
         pass
 
-    # Slow path: need to load from S3 with async coordination
     async with _symbol_table_async_load_locks_guard:
         if version_id not in _symbol_table_async_load_locks:
             _symbol_table_async_load_locks[version_id] = asyncio.Lock()
         lock = _symbol_table_async_load_locks[version_id]
 
     async with lock:
-        # Double-check: another coroutine may have loaded it while we waited
         try:
             return _symbol_table_cache.get(version_id)
         except KeyError:
             pass
 
-        # We're the loader - download from S3 in thread to avoid blocking
         print(f"Symbol table not in cache, loading from S3 for version {version_id}")
         symbol_table = await asyncio.to_thread(_download_symbol_table_sync, version_id)
         _, evicted_keys = _symbol_table_cache.put(version_id, symbol_table)
