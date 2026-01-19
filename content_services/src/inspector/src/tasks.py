@@ -34,15 +34,12 @@ from workflows.inspector_functions import (
 )
 
 from .hatchet_funcs import (
-    delete_folder_child_nodes_to_docs_cache_async,
-    delete_source_code_cache_async,
-    delete_tech_doc_output_cache_async,
-    get_tech_doc_output_cache_async,
-    put_folder_child_nodes_to_docs_cache_async,
-    put_source_code_cache_async,
+    folder_child_nodes_cache,
     put_symbol_table_cache,
-    put_tags_cache_async,
-    put_top_level_cache_async,
+    source_code_cache,
+    tags_cache,
+    tech_doc_output_cache,
+    top_level_cache,
 )
 
 TechDocsTask = Union["FileTechDocTask", "FolderTechDocTask", "TopLevelDocsTask"]
@@ -120,7 +117,7 @@ class FolderTechDocTask(Task):
                 if ContentKind(k) in pass_through_content_kinds
             }
         async with folder_tech_docs_sem:
-            await put_folder_child_nodes_to_docs_cache_async(
+            await folder_child_nodes_cache.aput(
                 f"{self.version_id}:{self.node.root_rel_path}",
                 child_nodes_to_docs,
             )
@@ -136,13 +133,13 @@ class FolderTechDocTask(Task):
                     child_key=f"{self.version_id}:{self.node.root_rel_path}"
                 ),
             )
-            docs = await get_tech_doc_output_cache_async(
+            docs = await tech_doc_output_cache.aget(
                 f"{self.version_id}:{self.node.root_rel_path}"
             )
-            await delete_tech_doc_output_cache_async(
+            await tech_doc_output_cache.adelete(
                 f"{self.version_id}:{self.node.root_rel_path}"
             )
-            await delete_folder_child_nodes_to_docs_cache_async(
+            await folder_child_nodes_cache.adelete(
                 f"{self.version_id}:{self.node.root_rel_path}"
             )
         return TaskResult(data={"docs": docs}, serialization=SerializationMethod.JSON)
@@ -317,7 +314,7 @@ class FileTechDocTask(Task):
                 .replace("\\u0000", "")
                 .replace("\x00", "")
             )  # Apparently the \\u0000 and \x00 is an issue with hatchet
-            await put_source_code_cache_async(
+            await source_code_cache.aput(
                 f"{self.version_id}:{self.node.root_rel_path}", cleaned_source
             )
             tech_doc_input = TechDocInput(
@@ -331,13 +328,13 @@ class FileTechDocTask(Task):
                     child_key=f"{self.version_id}:{self.node.root_rel_path}"
                 ),
             )
-            tech_doc_output = await get_tech_doc_output_cache_async(
+            tech_doc_output = await tech_doc_output_cache.aget(
                 f"{self.version_id}:{self.node.root_rel_path}"
             )
-            await delete_source_code_cache_async(
+            await source_code_cache.adelete(
                 f"{self.version_id}:{self.node.root_rel_path}"
             )
-            await delete_tech_doc_output_cache_async(
+            await tech_doc_output_cache.adelete(
                 f"{self.version_id}:{self.node.root_rel_path}"
             )
             success = tech_doc_output["success"]
@@ -641,7 +638,7 @@ class TopLevelDocsTask(Task):
         children_nodes_to_docs = {
             task.node: dr.data["docs"] for task, dr in dependent_results.items()
         }
-        await put_top_level_cache_async(
+        await top_level_cache.aput(
             str(self.db_version_node_id),
             children_nodes_to_docs,
         )
@@ -849,7 +846,7 @@ class CodebaseTaggingTask(Task):
             children_nodes_to_docs = {
                 task.node: dr.data["docs"] for task, dr in dependent_results.items()
             }
-            await put_tags_cache_async(
+            await tags_cache.aput(
                 str(self.db_root_version_node_id),
                 children_nodes_to_docs,
             )
