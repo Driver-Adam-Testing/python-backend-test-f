@@ -11,20 +11,17 @@ from hatchet_sdk.runnables.types import (
 )
 from inspector.src.deep_context_docs import deep_context_docs
 from inspector.src.hatchet_funcs import (
-    delete_diff_content_cache,
-    delete_tags_cache,
-    delete_top_level_cache,
+    diff_content_cache,
     export_tech_docs_to_zip,
-    get_diff_content_cache,
-    get_folder_child_nodes_to_docs_cache,
-    get_tags_cache,
-    get_top_level_cache,
+    folder_child_nodes_cache,
     make_codebase_tags,
     make_folder_tech_doc,
     make_symbol_docs,
     make_tech_doc,
     make_toplevel_tech_docs,
-    put_tech_doc_output_cache,
+    tags_cache,
+    tech_doc_output_cache,
+    top_level_cache,
 )
 from pydantic import BaseModel
 from shared.inspector.utils.dag import LiteNode, NodeKind
@@ -98,13 +95,13 @@ def codebase_tags_task(input: CodebaseTagsInput, ctx: Context) -> dict[str, str]
     #         status=node_status,
     #     )
     #     nodes_to_docs[node] = doc
-    nodes_to_docs = get_tags_cache(input.version_node_id)
+    nodes_to_docs = tags_cache.get(input.version_node_id)
     tags = make_codebase_tags(
         input.codebase_name,
         nodes_to_docs,
         input.content_kinds,
     )
-    delete_tags_cache(input.version_node_id)
+    tags_cache.delete(input.version_node_id)
     print("executed codebase tags task")
     return tags
 
@@ -149,9 +146,7 @@ async def deep_context_docs_task(input: DeepContextDocsInput, ctx: Context) -> d
             old_version_content.append(DeepContextDoc.model_validate(doc))
     code_diff = None
     if input.old_version_id is not None:
-        code_diff = get_diff_content_cache(
-            input.old_version_id,
-        )
+        code_diff = diff_content_cache.get(input.old_version_id)
 
     await deep_context_docs(
         input.old_version_id,
@@ -161,9 +156,7 @@ async def deep_context_docs_task(input: DeepContextDocsInput, ctx: Context) -> d
         input.install_id,
     )
     if input.old_version_id is not None:
-        delete_diff_content_cache(
-            input.old_version_id,
-        )
+        diff_content_cache.delete(input.old_version_id)
     print("executed deep context docs task")
     return {"status": "completed"}
 
@@ -195,7 +188,7 @@ def tech_doc_task(input: TechDocInput, ctx: Context) -> dict[str, str]:
         input.version_id,
     )
     cleaned_tech_docs = remove_null_unicode_character(data=tech_docs)
-    put_tech_doc_output_cache(
+    tech_doc_output_cache.put(
         f"{input.version_id}:{node.root_rel_path}", cleaned_tech_docs
     )
     print("executed tech doc task")
@@ -224,7 +217,7 @@ def folder_doc_task(input: FolderDocInput, ctx: Context) -> dict[str, str]:
         status=node_status,
     )
     print(node.root_rel_path.name)
-    child_nodes_to_docs = get_folder_child_nodes_to_docs_cache(
+    child_nodes_to_docs = folder_child_nodes_cache.get(
         f"{input.version_id}:{node.root_rel_path}"
     )
     folder_docs = make_folder_tech_doc(
@@ -234,7 +227,7 @@ def folder_doc_task(input: FolderDocInput, ctx: Context) -> dict[str, str]:
         input.previous_content,
     )
     cleaned_folder_docs = remove_null_unicode_character(data=folder_docs)
-    put_tech_doc_output_cache(
+    tech_doc_output_cache.put(
         f"{input.version_id}:{node.root_rel_path}", cleaned_folder_docs
     )
     print("executed folder doc task")
@@ -294,12 +287,12 @@ def toplevel_doc_task(input: TopLevelDocInput, ctx: Context) -> dict[str, Any]:
     #         status=node_status,
     #     )
     #     nodes_to_docs[node] = doc
-    nodes_to_docs = get_top_level_cache(input.version_node_id)
+    nodes_to_docs = top_level_cache.get(input.version_node_id)
     toplevel_docs = make_toplevel_tech_docs(
         input.codebase_name,
         nodes_to_docs,
     )
-    delete_top_level_cache(input.version_node_id)
+    top_level_cache.delete(input.version_node_id)
     print("executed toplevel doc task")
     cleaned_top_level_docs = remove_null_unicode_character(data=toplevel_docs)
     return cleaned_top_level_docs

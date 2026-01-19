@@ -5,6 +5,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 logger = logging.getLogger(__name__)
 
@@ -160,13 +161,13 @@ def cleanup_symbol_table_cache(version_id: str) -> None:
 
 def _get_cache_s3_key(cache_type: str, key: str) -> str:
     """Generate S3 key for a cache entry. Uses 'cache/' prefix for lifecycle rules."""
-    safe_key = key.replace("/", "_").replace(":", "_")
+    safe_key = quote(key, safe="")
     return f"cache/{cache_type}/{safe_key}.pkl"
 
 
 def _get_cache_local_path(cache_type: str, key: str) -> Path:
     """Generate local file path for cache entry."""
-    safe_key = key.replace("/", "_").replace(":", "_")
+    safe_key = quote(key, safe="")
     return Path(f"/tmp/inspector_cache_{cache_type}_{safe_key}.pkl")
 
 
