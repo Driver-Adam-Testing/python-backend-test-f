@@ -20,16 +20,19 @@ class TTLCache:
         self._lock = threading.Lock()
         self._default_ttl = default_ttl_seconds
 
-    def put(self, key: str, value: Any, ttl_seconds: int | None = None) -> str:
+    def put(
+        self, key: str, value: Any, ttl_seconds: int | None = None
+    ) -> tuple[str, list[str]]:
+        """Put a value in the cache. Returns (key, evicted_keys)."""
         now = time.time()
         ttl = ttl_seconds if ttl_seconds is not None else self._default_ttl
         expires = now + ttl
 
         with self._lock:
-            self._evict_expired(now)
+            evicted_keys = self._evict_expired(now)
             self._cache[key] = (value, expires)
 
-        return key
+        return key, evicted_keys
 
     def get(self, key: str) -> Any:
         now = time.time()
@@ -45,10 +48,11 @@ class TTLCache:
         with self._lock:
             self._cache.pop(key, None)
 
-    def _evict_expired(self, now: float) -> None:
+    def _evict_expired(self, now: float) -> list[str]:
         keys_to_delete = [k for k, (_, exp) in self._cache.items() if exp < now]
         for k in keys_to_delete:
             del self._cache[k]
+        return keys_to_delete
 
 
 class S3BackedTTLCache:
@@ -126,7 +130,13 @@ class S3BackedTTLCache:
     def put(self, key: str, value: Any, ttl_seconds: int | None = None) -> str:
         """Put value in L1 (memory) and L2 (S3). Blocking - use aput() in async code."""
         # Write to L1
-        self._l1.put(key, value, ttl_seconds)
+        _, evicted_keys = self._l1.put(key, value, ttl_seconds)
+
+        # Clean up locks for evicted keys to prevent memory leak
+        if evicted_keys:
+            with self._load_locks_guard:
+                for evicted_key in evicted_keys:
+                    self._load_locks.pop(evicted_key, None)
 
         # Write to L2 (S3)
         try:
@@ -171,6 +181,10 @@ class S3BackedTTLCache:
         # Delete from L1
         self._l1.delete(key)
 
+        # Clean up associated locks to prevent memory leak
+        with self._load_locks_guard:
+            self._load_locks.pop(key, None)
+
         # NOTE: Do NOT delete from L2 (S3) in case we resume inspection and must refetch the cache result
 
     # ==================== Async methods ====================
@@ -178,7 +192,13 @@ class S3BackedTTLCache:
     async def aput(self, key: str, value: Any, ttl_seconds: int | None = None) -> str:
         """Async put - runs S3 upload in thread to avoid blocking event loop."""
         # Write to L1 (fast, no I/O)
-        self._l1.put(key, value, ttl_seconds)
+        _, evicted_keys = self._l1.put(key, value, ttl_seconds)
+
+        # Clean up async locks for evicted keys to prevent memory leak
+        if evicted_keys:
+            async with self._async_load_locks_guard:
+                for evicted_key in evicted_keys:
+                    self._async_load_locks.pop(evicted_key, None)
 
         # Write to L2 (S3) in thread
         try:
@@ -222,6 +242,10 @@ class S3BackedTTLCache:
         # Delete from L1 (fast)
         self._l1.delete(key)
 
+        # Clean up associated locks to prevent memory leak
+        async with self._async_load_locks_guard:
+            self._async_load_locks.pop(key, None)
+
         # NOTE: Do NOT delete from L2 (S3) in case we resume inspection and must refetch the cache result
 
 
@@ -230,12 +254,13 @@ class S3BackedTTLCache:
 _symbol_table_cache = TTLCache()
 
 # All caches are S3-backed for container reschedule resilience
-_top_level_cache = S3BackedTTLCache(cache_type="top_level")
-_tags_cache = S3BackedTTLCache(cache_type="tags")
-_source_code_cache = S3BackedTTLCache(cache_type="source_code")
-_tech_doc_output_cache = S3BackedTTLCache(cache_type="tech_doc_output")
-_diff_content_cache = S3BackedTTLCache(cache_type="diff_content")
-_folder_child_nodes_to_docs_cache = S3BackedTTLCache(cache_type="folder_child_nodes")
+# Import these directly and use .get()/.put()/.aget()/.aput() methods
+top_level_cache = S3BackedTTLCache(cache_type="top_level")
+tags_cache = S3BackedTTLCache(cache_type="tags")
+source_code_cache = S3BackedTTLCache(cache_type="source_code")
+tech_doc_output_cache = S3BackedTTLCache(cache_type="tech_doc_output")
+diff_content_cache = S3BackedTTLCache(cache_type="diff_content")
+folder_child_nodes_cache = S3BackedTTLCache(cache_type="folder_child_nodes")
 
 # Coordinated loading infrastructure for symbol table
 # Prevents multiple concurrent downloads when cache is cold after container reschedule
@@ -262,7 +287,15 @@ def _download_symbol_table_sync(version_id: str) -> dict:
 
 # Public API - keeps existing interface intact
 def put_symbol_table_cache(key: str, value: dict, ttl_seconds: int = 28800) -> str:
-    return _symbol_table_cache.put(key, value, ttl_seconds)
+    result_key, evicted_keys = _symbol_table_cache.put(key, value, ttl_seconds)
+
+    # Clean up locks for evicted keys to prevent memory leak
+    if evicted_keys:
+        with _symbol_table_load_locks_guard:
+            for evicted_key in evicted_keys:
+                _symbol_table_load_locks.pop(evicted_key, None)
+
+    return result_key
 
 
 def get_symbol_table_cache(key: str) -> dict:
@@ -271,6 +304,10 @@ def get_symbol_table_cache(key: str) -> dict:
 
 def delete_symbol_table_cache(key: str) -> None:
     _symbol_table_cache.delete(key)
+
+    # Clean up associated lock to prevent memory leak
+    with _symbol_table_load_locks_guard:
+        _symbol_table_load_locks.pop(key, None)
 
 
 def get_or_load_symbol_table(version_id: str) -> dict:
@@ -305,7 +342,14 @@ def get_or_load_symbol_table(version_id: str) -> dict:
         # We're the loader - download from S3
         print(f"Symbol table not in cache, loading from S3 for version {version_id}")
         symbol_table = _download_symbol_table_sync(version_id)
-        _symbol_table_cache.put(version_id, symbol_table)
+        _, evicted_keys = _symbol_table_cache.put(version_id, symbol_table)
+
+        # Clean up locks for evicted keys to prevent memory leak
+        if evicted_keys:
+            with _symbol_table_load_locks_guard:
+                for evicted_key in evicted_keys:
+                    _symbol_table_load_locks.pop(evicted_key, None)
+
         print(f"Symbol table loaded and cached for version {version_id}")
         return symbol_table
 
@@ -339,177 +383,16 @@ async def get_or_load_symbol_table_async(version_id: str) -> dict:
         # We're the loader - download from S3 in thread to avoid blocking
         print(f"Symbol table not in cache, loading from S3 for version {version_id}")
         symbol_table = await asyncio.to_thread(_download_symbol_table_sync, version_id)
-        _symbol_table_cache.put(version_id, symbol_table)
+        _, evicted_keys = _symbol_table_cache.put(version_id, symbol_table)
+
+        # Clean up async locks for evicted keys to prevent memory leak
+        if evicted_keys:
+            async with _symbol_table_async_load_locks_guard:
+                for evicted_key in evicted_keys:
+                    _symbol_table_async_load_locks.pop(evicted_key, None)
+
         print(f"Symbol table loaded and cached for version {version_id}")
         return symbol_table
-
-
-# Top level cache - S3-backed (sync versions)
-def put_top_level_cache(key: str, value: dict, ttl_seconds: int = 28800) -> str:
-    return _top_level_cache.put(key, value, ttl_seconds)
-
-
-def get_top_level_cache(key: str) -> dict:
-    return _top_level_cache.get(key)
-
-
-def delete_top_level_cache(key: str) -> None:
-    _top_level_cache.delete(key)
-
-
-# Top level cache - async versions
-async def put_top_level_cache_async(
-    key: str, value: dict, ttl_seconds: int = 28800
-) -> str:
-    return await _top_level_cache.aput(key, value, ttl_seconds)
-
-
-async def get_top_level_cache_async(key: str) -> dict:
-    return await _top_level_cache.aget(key)
-
-
-async def delete_top_level_cache_async(key: str) -> None:
-    await _top_level_cache.adelete(key)
-
-
-# Tags cache - S3-backed (sync versions)
-def put_tags_cache(key: str, value: dict, ttl_seconds: int = 28800) -> str:
-    return _tags_cache.put(key, value, ttl_seconds)
-
-
-def get_tags_cache(key: str) -> dict:
-    return _tags_cache.get(key)
-
-
-def delete_tags_cache(key: str) -> None:
-    _tags_cache.delete(key)
-
-
-# Tags cache - async versions
-async def put_tags_cache_async(key: str, value: dict, ttl_seconds: int = 28800) -> str:
-    return await _tags_cache.aput(key, value, ttl_seconds)
-
-
-async def get_tags_cache_async(key: str) -> dict:
-    return await _tags_cache.aget(key)
-
-
-async def delete_tags_cache_async(key: str) -> None:
-    await _tags_cache.adelete(key)
-
-
-# Diff content cache - S3-backed (sync versions)
-def put_diff_content_cache(key: str, value: dict, ttl_seconds: int = 28800) -> str:
-    return _diff_content_cache.put(key, value, ttl_seconds)
-
-
-def get_diff_content_cache(key: str) -> dict:
-    return _diff_content_cache.get(key)
-
-
-def delete_diff_content_cache(key: str) -> None:
-    _diff_content_cache.delete(key)
-
-
-# Diff content cache - async versions for async code
-async def put_diff_content_cache_async(
-    key: str, value: dict, ttl_seconds: int = 28800
-) -> str:
-    return await _diff_content_cache.aput(key, value, ttl_seconds)
-
-
-async def get_diff_content_cache_async(key: str) -> dict:
-    return await _diff_content_cache.aget(key)
-
-
-async def delete_diff_content_cache_async(key: str) -> None:
-    await _diff_content_cache.adelete(key)
-
-
-# Source code cache - S3-backed (sync versions)
-def put_source_code_cache(key: str, value: str, ttl_seconds: int = 28800) -> str:
-    return _source_code_cache.put(key, value, ttl_seconds)
-
-
-def get_source_code_cache(key: str) -> str:
-    return _source_code_cache.get(key)
-
-
-def delete_source_code_cache(key: str) -> None:
-    _source_code_cache.delete(key)
-
-
-# Source code cache - async versions
-async def put_source_code_cache_async(
-    key: str, value: str, ttl_seconds: int = 28800
-) -> str:
-    return await _source_code_cache.aput(key, value, ttl_seconds)
-
-
-async def get_source_code_cache_async(key: str) -> str:
-    return await _source_code_cache.aget(key)
-
-
-async def delete_source_code_cache_async(key: str) -> None:
-    await _source_code_cache.adelete(key)
-
-
-# Tech doc output cache - S3-backed (sync versions)
-def put_tech_doc_output_cache(key: str, value: dict, ttl_seconds: int = 28800) -> str:
-    return _tech_doc_output_cache.put(key, value, ttl_seconds)
-
-
-def get_tech_doc_output_cache(key: str) -> dict:
-    return _tech_doc_output_cache.get(key)
-
-
-def delete_tech_doc_output_cache(key: str) -> None:
-    _tech_doc_output_cache.delete(key)
-
-
-# Tech doc output cache - async versions
-async def put_tech_doc_output_cache_async(
-    key: str, value: dict, ttl_seconds: int = 28800
-) -> str:
-    return await _tech_doc_output_cache.aput(key, value, ttl_seconds)
-
-
-async def get_tech_doc_output_cache_async(key: str) -> dict:
-    return await _tech_doc_output_cache.aget(key)
-
-
-async def delete_tech_doc_output_cache_async(key: str) -> None:
-    await _tech_doc_output_cache.adelete(key)
-
-
-# Folder child nodes cache - S3-backed (sync versions)
-def put_folder_child_nodes_to_docs_cache(
-    key: str, value: dict, ttl_seconds: int = 28800
-) -> str:
-    return _folder_child_nodes_to_docs_cache.put(key, value, ttl_seconds)
-
-
-def get_folder_child_nodes_to_docs_cache(key: str) -> dict:
-    return _folder_child_nodes_to_docs_cache.get(key)
-
-
-def delete_folder_child_nodes_to_docs_cache(key: str) -> None:
-    _folder_child_nodes_to_docs_cache.delete(key)
-
-
-# Folder child nodes cache - async versions for async code
-async def put_folder_child_nodes_to_docs_cache_async(
-    key: str, value: dict, ttl_seconds: int = 28800
-) -> str:
-    return await _folder_child_nodes_to_docs_cache.aput(key, value, ttl_seconds)
-
-
-async def get_folder_child_nodes_to_docs_cache_async(key: str) -> dict:
-    return await _folder_child_nodes_to_docs_cache.aget(key)
-
-
-async def delete_folder_child_nodes_to_docs_cache_async(key: str) -> None:
-    await _folder_child_nodes_to_docs_cache.adelete(key)
 
 
 def make_tech_doc(
@@ -530,7 +413,7 @@ def make_tech_doc(
 
     full_symbol_table = get_or_load_symbol_table(version_id)
 
-    source_code = get_source_code_cache(f"{version_id}:{node.root_rel_path}")
+    source_code = source_code_cache.get(f"{version_id}:{node.root_rel_path}")
     reified_symbols = full_symbol_table.get(node.root_rel_path, None)
 
     file_docs_successful, file_doc = comprehend_file_top_down(
