@@ -71,18 +71,18 @@ class S3BackedTTLCache:
     Provides both sync and async methods:
     - Sync methods (put, get, delete): Use for sync Hatchet tasks
     - Async methods (aput, aget, adelete): Use for async code to avoid blocking event loop
+
+    Both sync and async paths share the same lock infrastructure, ensuring proper
+    coordination when the same key is accessed via both get() and aget().
     """
 
     def __init__(self, cache_type: str, default_ttl_seconds: int = 28800) -> None:
         self._l1 = TTLCache(default_ttl_seconds)
         self._cache_type = cache_type
         self._default_ttl = default_ttl_seconds
-        # Threading lock for sync coordination
+        # Unified lock for both sync and async coordination
         self._load_locks: dict[str, threading.Lock] = {}
         self._load_locks_guard = threading.Lock()
-        # Async lock for async coordination
-        self._async_load_locks: dict[str, asyncio.Lock] = {}
-        self._async_load_locks_guard = asyncio.Lock()
 
     def _get_s3_client_and_bucket(self) -> tuple[Any, str]:
         s3_client = boto3.client(
@@ -119,6 +119,30 @@ class S3BackedTTLCache:
             bucket_name=bucket_name,
         )
 
+    def _coordinated_load_from_s3(self, key: str) -> Any:
+        """Coordinated S3 loading used by both get() and aget().
+
+        Uses threading.Lock for coordination, enabling proper synchronization
+        between sync and async callers (async uses asyncio.to_thread).
+        """
+        with self._load_locks_guard:
+            if key not in self._load_locks:
+                self._load_locks[key] = threading.Lock()
+            lock = self._load_locks[key]
+
+        with lock:
+            try:
+                return self._l1.get(key)
+            except KeyError:
+                pass
+
+            print(
+                f"Cache [{self._cache_type}] not in memory, loading from S3 for key {key}"
+            )
+            value = self._download_from_s3(key)
+            self._l1.put(key, value)
+            return value
+
     def put(self, key: str, value: Any, ttl_seconds: int | None = None) -> str:
         _, evicted_keys = self._l1.put(key, value, ttl_seconds)
 
@@ -139,25 +163,7 @@ class S3BackedTTLCache:
             return self._l1.get(key)
         except KeyError:
             pass
-
-        with self._load_locks_guard:
-            if key not in self._load_locks:
-                self._load_locks[key] = threading.Lock()
-            lock = self._load_locks[key]
-
-        with lock:
-            # Double-check L1 (another thread may have loaded it)
-            try:
-                return self._l1.get(key)
-            except KeyError:
-                pass
-
-            print(
-                f"Cache [{self._cache_type}] not in memory, loading from S3 for key {key}"
-            )
-            value = self._download_from_s3(key)
-            self._l1.put(key, value)
-            return value
+        return self._coordinated_load_from_s3(key)
 
     def delete(self, key: str) -> None:
         self._l1.delete(key)
@@ -171,9 +177,13 @@ class S3BackedTTLCache:
         _, evicted_keys = self._l1.put(key, value, ttl_seconds)
 
         if evicted_keys:
-            async with self._async_load_locks_guard:
-                for evicted_key in evicted_keys:
-                    self._async_load_locks.pop(evicted_key, None)
+
+            def cleanup_evicted() -> None:
+                with self._load_locks_guard:
+                    for evicted_key in evicted_keys:
+                        self._load_locks.pop(evicted_key, None)
+
+            await asyncio.to_thread(cleanup_evicted)
 
         try:
             await asyncio.to_thread(self._upload_to_s3, key, value)
@@ -187,31 +197,14 @@ class S3BackedTTLCache:
             return self._l1.get(key)
         except KeyError:
             pass
-
-        async with self._async_load_locks_guard:
-            if key not in self._async_load_locks:
-                self._async_load_locks[key] = asyncio.Lock()
-            lock = self._async_load_locks[key]
-
-        async with lock:
-            # Double-check L1
-            try:
-                return self._l1.get(key)
-            except KeyError:
-                pass
-
-            print(
-                f"Cache [{self._cache_type}] not in memory, loading from S3 for key {key}"
-            )
-            value = await asyncio.to_thread(self._download_from_s3, key)
-            self._l1.put(key, value)
-            return value
+        return await asyncio.to_thread(self._coordinated_load_from_s3, key)
 
     async def adelete(self, key: str) -> None:
         self._l1.delete(key)
 
-        # Clean up associated locks to prevent memory leak
-        async with self._async_load_locks_guard:
-            self._async_load_locks.pop(key, None)
+        def cleanup_lock() -> None:
+            with self._load_locks_guard:
+                self._load_locks.pop(key, None)
 
+        await asyncio.to_thread(cleanup_lock)
         # NOTE: Do NOT delete from L2 (S3) in case we resume inspection and must refetch the cache result
