@@ -252,6 +252,24 @@ class TestS3BackedTTLCacheSyncMethods:
 
             assert "old_key" not in cache._load_locks
 
+    def test_lock_cleanup_on_eviction_during_coordinated_load(self):
+        """Locks are cleaned up when eviction happens during S3 fallback in get()."""
+        cache = S3BackedTTLCache(cache_type="test", default_ttl_seconds=60)
+
+        with patch.object(cache, "_download_from_s3", return_value="s3_value"):
+            # Put a key that will expire, with a lock
+            cache._l1.put("old_key", "old_value", ttl_seconds=0)
+            cache._load_locks["old_key"] = threading.Lock()
+
+            time.sleep(0.01)
+
+            # get() on missing key triggers _coordinated_load_from_s3
+            # which calls _l1.put() after download, triggering eviction
+            result = cache.get("new_key")
+
+            assert result == "s3_value"
+            assert "old_key" not in cache._load_locks
+
 
 class TestS3BackedTTLCacheAsyncMethods:
     """Tests for S3BackedTTLCache async methods (aput/aget/adelete)."""
