@@ -140,7 +140,13 @@ class S3BackedTTLCache:
                 f"Cache [{self._cache_type}] not in memory, loading from S3 for key {key}"
             )
             value = self._download_from_s3(key)
-            self._l1.put(key, value)
+            _, evicted_keys = self._l1.put(key, value)
+
+            if evicted_keys:
+                with self._load_locks_guard:
+                    for evicted_key in evicted_keys:
+                        self._load_locks.pop(evicted_key, None)
+
             return value
 
     def put(self, key: str, value: Any, ttl_seconds: int | None = None) -> str:
