@@ -146,7 +146,7 @@ async def deep_context_docs_task(input: DeepContextDocsInput, ctx: Context) -> d
             old_version_content.append(DeepContextDoc.model_validate(doc))
     code_diff = None
     if input.old_version_id is not None:
-        code_diff = diff_content_cache.get(input.old_version_id)
+        code_diff = await diff_content_cache.aget(str(input.old_version_id))
 
     await deep_context_docs(
         input.old_version_id,
@@ -156,7 +156,7 @@ async def deep_context_docs_task(input: DeepContextDocsInput, ctx: Context) -> d
         input.install_id,
     )
     if input.old_version_id is not None:
-        diff_content_cache.delete(input.old_version_id)
+        await diff_content_cache.adelete(str(input.old_version_id))
     print("executed deep context docs task")
     return {"status": "completed"}
 
