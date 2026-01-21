@@ -27,10 +27,9 @@ folder_child_nodes_cache = S3BackedTTLCache(cache_type="folder_child_nodes")
 
 # Coordinated loading infrastructure for symbol table
 # Prevents multiple concurrent downloads when cache is cold after container reschedule
+# Uses unified threading locks for both sync and async paths (async uses asyncio.to_thread)
 _symbol_table_load_locks: dict[str, threading.Lock] = {}
 _symbol_table_load_locks_guard = threading.Lock()
-_symbol_table_async_load_locks: dict[str, asyncio.Lock] = {}
-_symbol_table_async_load_locks_guard = asyncio.Lock()
 
 
 def _download_symbol_table_sync(version_id: str) -> dict:
@@ -85,7 +84,15 @@ def get_or_load_symbol_table(version_id: str) -> dict:
         return _symbol_table_cache.get(version_id)
     except KeyError:
         pass
+    return _coordinated_load_symbol_table(version_id)
 
+
+def _coordinated_load_symbol_table(version_id: str) -> dict:
+    """Coordinated symbol table loading used by both sync and async paths.
+
+    Uses threading.Lock for coordination, enabling proper synchronization
+    between sync and async callers (async uses asyncio.to_thread).
+    """
     with _symbol_table_load_locks_guard:
         if version_id not in _symbol_table_load_locks:
             _symbol_table_load_locks[version_id] = threading.Lock()
@@ -117,36 +124,14 @@ async def get_or_load_symbol_table_async(version_id: str) -> dict:
 
     This function ensures that when multiple tasks need the symbol table on a
     cold container (after reschedule), only ONE task downloads from S3 while
-    others wait. Runs S3 download in thread to avoid blocking event loop.
+    others wait. Runs coordinated loading in thread to avoid blocking event loop.
     """
     try:
         return _symbol_table_cache.get(version_id)
     except KeyError:
         pass
 
-    async with _symbol_table_async_load_locks_guard:
-        if version_id not in _symbol_table_async_load_locks:
-            _symbol_table_async_load_locks[version_id] = asyncio.Lock()
-        lock = _symbol_table_async_load_locks[version_id]
-
-    async with lock:
-        try:
-            return _symbol_table_cache.get(version_id)
-        except KeyError:
-            pass
-
-        print(f"Symbol table not in cache, loading from S3 for version {version_id}")
-        symbol_table = await asyncio.to_thread(_download_symbol_table_sync, version_id)
-        _, evicted_keys = _symbol_table_cache.put(version_id, symbol_table)
-
-        # Clean up async locks for evicted keys to prevent memory leak
-        if evicted_keys:
-            async with _symbol_table_async_load_locks_guard:
-                for evicted_key in evicted_keys:
-                    _symbol_table_async_load_locks.pop(evicted_key, None)
-
-        print(f"Symbol table loaded and cached for version {version_id}")
-        return symbol_table
+    return await asyncio.to_thread(_coordinated_load_symbol_table, version_id)
 
 
 def make_tech_doc(
